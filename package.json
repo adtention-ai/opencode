@@ -1,0 +1,38 @@
+{
+  "name": "@adtention/opencode",
+  "version": "0.0.1",
+  "description": "ADtention sponsor unit for OpenCode — one quiet sponsor line in the TUI footer that pays you while your agent works.",
+  "type": "module",
+  "license": "MIT",
+  "homepage": "https://adtention.ai",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/adtention-ai/opencode.git"
+  },
+  "bugs": {
+    "url": "https://github.com/adtention-ai/opencode/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "exports": {
+    "./tui": "./src/tui.tsx"
+  },
+  "engines": {
+    "opencode": ">=1.17.0"
+  },
+  "peerDependencies": {
+    "@opencode-ai/plugin": ">=1.17.0",
+    "@opentui/solid": ">=0.3.4",
+    "solid-js": ">=1.8.0"
+  },
+  "files": [
+    "src"
+  ],
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "adtention",
+    "sponsor"
+  ]
+}
