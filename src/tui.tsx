@@ -10,10 +10,12 @@
 // Left = the sponsor unit; right = the user's running ADtention balance.
 //
 // Protocol (shared with the Claude Code client):
-//   - POST /v1/register {ref?} -> {publisher_id, ...}   (one-time, non-billable)
-//   - POST /v1/serve {publisher_id, category, nonce}     (THE billable impression)
+//   - POST /v1/register {client, ref?} -> {publisher_id, ...}        (one-time, non-billable)
+//   - POST /v1/serve {publisher_id, category, nonce, client}          (THE billable impression)
 //       -> {text, balance_usd, click_url, impression_id}
-//   - GET  /v1/click/<impression_id>                     (attributable click)
+//   - GET  /v1/click/<impression_id>                                 (attributable click)
+// `client` is a static originating-tool tag ("opencode"); the server stamps it on the
+// publisher (at register) and on each impression (at serve) for traffic attribution.
 //
 // Economics: a serve is billable, so we only serve on a REAL prompt — the
 // `session.status` -> "busy" transition — at most once every 15s. An idle
@@ -44,6 +46,10 @@ const FALLBACK: Sponsor = { text: "Alchemy: APIs for every chain", url: "alchemy
 
 const DEFAULT_API = "https://api.adtention.ai"
 const MIN_DWELL_MS = 15_000
+
+// Originating-tool tag, sent on register (owning tool) and serve (per-impression). The server
+// sanitizes it to a slug and falls back to the publisher's owning tool when omitted.
+const CLIENT_TAG = "opencode"
 
 const KV_SPONSOR = "adtention:sponsor"
 const KV_BALANCE = "adtention:balance"
@@ -176,7 +182,7 @@ const tui: TuiPlugin = async (api, options) => {
       }
       try {
         const ref = process.env.ADTENTION_REF ? sanitizeRef(process.env.ADTENTION_REF) : ""
-        const data = await postJSON("/v1/register", ref ? { ref } : undefined)
+        const data = await postJSON("/v1/register", { client: CLIENT_TAG, ...(ref ? { ref } : {}) })
         if (data && typeof data.publisher_id === "string") {
           publisherId = data.publisher_id
           try {
@@ -217,7 +223,7 @@ const tui: TuiPlugin = async (api, options) => {
 
   async function safeServe(pub: string, category: string) {
     try {
-      return await postJSON("/v1/serve", { publisher_id: pub, category, nonce: makeNonce() })
+      return await postJSON("/v1/serve", { publisher_id: pub, category, nonce: makeNonce(), client: CLIENT_TAG })
     } catch {
       return null
     }

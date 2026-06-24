@@ -1,6 +1,6 @@
 {
   "name": "@adtention/opencode",
-  "version": "0.0.1",
+  "version": "0.1.0",
   "description": "ADtention sponsor unit for OpenCode — one quiet sponsor line in the TUI footer that pays you while your agent works.",
   "type": "module",
   "license": "MIT",
