@@ -1,6 +1,6 @@
 {
   "name": "@adtention/opencode",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "ADtention sponsor unit for OpenCode — one quiet sponsor line in the TUI footer that pays you while your agent works.",
   "type": "module",
   "scripts": {
