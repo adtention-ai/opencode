@@ -16,6 +16,7 @@ permissions:
   actions: write
   contents: write
   pull-requests: read
+  statuses: write
 
 concurrency:
   group: prepare-release-version-${{ github.event.pull_request.number }}
@@ -147,4 +148,67 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          SHA="${{ steps.commit.outputs.sha }}"
+          CONTEXT="ci"
+
+          gh api "repos/${GITHUB_REPOSITORY}/statuses/${SHA}" \
+            -f state=pending \
+            -f context="$CONTEXT" \
+            -f description="CI workflow dispatched for version bump"
+
           gh workflow run ci.yml --ref dev
+
+          RUN_ID=""
+          for _ in {1..30}; do
+            RUN_ID="$(gh run list \
+              --repo "$GITHUB_REPOSITORY" \
+              --workflow ci.yml \
+              --branch dev \
+              --event workflow_dispatch \
+              --json databaseId,headSha \
+              --jq "map(select(.headSha == \"${SHA}\")) | first | .databaseId // \"\"")"
+
+            if [ -n "$RUN_ID" ]; then
+              break
+            fi
+
+            sleep 2
+          done
+
+          if [ -z "$RUN_ID" ]; then
+            gh api "repos/${GITHUB_REPOSITORY}/statuses/${SHA}" \
+              -f state=error \
+              -f context="$CONTEXT" \
+              -f description="CI workflow dispatch was not found"
+            exit 1
+          fi
+
+          RUN_URL="$(gh run view "$RUN_ID" --repo "$GITHUB_REPOSITORY" --json url --jq .url)"
+
+          for _ in {1..90}; do
+            STATUS="$(gh run view "$RUN_ID" --repo "$GITHUB_REPOSITORY" --json status --jq .status)"
+
+            if [ "$STATUS" = "completed" ]; then
+              break
+            fi
+
+            sleep 10
+          done
+
+          CONCLUSION="$(gh run view "$RUN_ID" --repo "$GITHUB_REPOSITORY" --json conclusion --jq .conclusion)"
+
+          if [ "$CONCLUSION" = "success" ]; then
+            STATE="success"
+            DESCRIPTION="CI workflow passed"
+          else
+            STATE="failure"
+            DESCRIPTION="CI workflow concluded: ${CONCLUSION:-unknown}"
+          fi
+
+          gh api "repos/${GITHUB_REPOSITORY}/statuses/${SHA}" \
+            -f state="$STATE" \
+            -f context="$CONTEXT" \
+            -f target_url="$RUN_URL" \
+            -f description="$DESCRIPTION"
+
+          [ "$STATE" = "success" ]
