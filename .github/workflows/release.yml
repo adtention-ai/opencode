@@ -1,0 +1,107 @@
+name: Release
+
+on:
+  pull_request:
+    types:
+      - closed
+    branches:
+      - main
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  release:
+    name: release
+    if: >
+      github.event.pull_request.merged == true &&
+      github.event.pull_request.base.ref == 'main' &&
+      github.event.pull_request.head.ref == 'dev' &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    environment:
+      name: npm-production
+
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          registry-url: https://registry.npmjs.org
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Read package metadata
+        id: package
+        shell: bash
+        run: |
+          set -euo pipefail
+          node <<'NODE' >> "$GITHUB_OUTPUT"
+          const fs = require("node:fs")
+          const pkg = JSON.parse(fs.readFileSync("package.json", "utf8"))
+          console.log(`name=${pkg.name}`)
+          console.log(`version=${pkg.version}`)
+          NODE
+
+      - name: Verify version is unreleased
+        shell: bash
+        run: |
+          set -euo pipefail
+          PACKAGE_NAME="${{ steps.package.outputs.name }}"
+          VERSION="${{ steps.package.outputs.version }}"
+
+          if git ls-remote --exit-code --tags origin "refs/tags/v${VERSION}" >/dev/null 2>&1; then
+            echo "Tag v${VERSION} already exists."
+            exit 1
+          fi
+
+          set +e
+          NPM_OUTPUT="$(npm view "${PACKAGE_NAME}@${VERSION}" version 2>&1)"
+          NPM_STATUS=$?
+          set -e
+
+          if [ "$NPM_STATUS" -eq 0 ]; then
+            echo "${PACKAGE_NAME}@${VERSION} already exists on npm."
+            exit 1
+          fi
+
+          if ! printf '%s' "$NPM_OUTPUT" | grep -Eq 'E404|404 Not Found|No match found|is not in this registry'; then
+            echo "$NPM_OUTPUT"
+            exit "$NPM_STATUS"
+          fi
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Test
+        run: npm test
+
+      - name: Build
+        run: npm run build
+
+      - name: Publish to npm
+        run: npm publish --access public
+
+      - name: Create Git tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.package.outputs.version }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "v${VERSION}" -m "v${VERSION}"
+          git push origin "v${VERSION}"
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "v${{ steps.package.outputs.version }}" --title "v${{ steps.package.outputs.version }}" --generate-notes --verify-tag

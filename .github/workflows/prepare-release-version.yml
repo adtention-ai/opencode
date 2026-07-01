@@ -1,0 +1,150 @@
+name: Prepare release version
+
+on:
+  pull_request:
+    types:
+      - opened
+      - reopened
+      - synchronize
+      - labeled
+      - unlabeled
+      - ready_for_review
+    branches:
+      - main
+
+permissions:
+  actions: write
+  contents: write
+  pull-requests: read
+
+concurrency:
+  group: prepare-release-version-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    name: prepare
+    if: >
+      github.event.pull_request.base.ref == 'main' &&
+      github.event.pull_request.head.ref == 'dev' &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout dev
+        uses: actions/checkout@v4
+        with:
+          ref: dev
+          fetch-depth: 0
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Calculate next version
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin main --depth=1
+          MAIN_PACKAGE_JSON="$(git show origin/main:package.json)"
+          MAIN_PACKAGE_JSON="$MAIN_PACKAGE_JSON" node <<'NODE' > "$GITHUB_OUTPUT"
+          const fs = require("node:fs")
+          const event = JSON.parse(fs.readFileSync(process.env.GITHUB_EVENT_PATH, "utf8"))
+          const mainPackage = JSON.parse(process.env.MAIN_PACKAGE_JSON)
+          const labels = new Set(event.pull_request.labels.map((label) => label.name))
+          const bump = labels.has("release:major") ? "major" : labels.has("release:minor") ? "minor" : "patch"
+          const match = /^(\d+)\.(\d+)\.(\d+)$/.exec(mainPackage.version)
+
+          if (!match) {
+            throw new Error(`Cannot calculate next release from non-standard version: ${mainPackage.version}`)
+          }
+
+          let [, major, minor, patch] = match.map(Number)
+
+          if (bump === "major") {
+            major += 1
+            minor = 0
+            patch = 0
+          } else if (bump === "minor") {
+            minor += 1
+            patch = 0
+          } else {
+            patch += 1
+          }
+
+          console.log(`package_name=${mainPackage.name}`)
+          console.log(`main_version=${mainPackage.version}`)
+          console.log(`bump=${bump}`)
+          console.log(`version=${major}.${minor}.${patch}`)
+          NODE
+
+      - name: Verify version is unreleased
+        shell: bash
+        run: |
+          set -euo pipefail
+          PACKAGE_NAME="${{ steps.version.outputs.package_name }}"
+          VERSION="${{ steps.version.outputs.version }}"
+
+          if git ls-remote --exit-code --tags origin "refs/tags/v${VERSION}" >/dev/null 2>&1; then
+            echo "Tag v${VERSION} already exists."
+            exit 1
+          fi
+
+          set +e
+          NPM_OUTPUT="$(npm view "${PACKAGE_NAME}@${VERSION}" version 2>&1)"
+          NPM_STATUS=$?
+          set -e
+
+          if [ "$NPM_STATUS" -eq 0 ]; then
+            echo "${PACKAGE_NAME}@${VERSION} already exists on npm."
+            exit 1
+          fi
+
+          if ! printf '%s' "$NPM_OUTPUT" | grep -Eq 'E404|404 Not Found|No match found|is not in this registry'; then
+            echo "$NPM_OUTPUT"
+            exit "$NPM_STATUS"
+          fi
+
+      - name: Update package version
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.version.outputs.version }}"
+          npm version "$VERSION" --no-git-tag-version --allow-same-version
+          npm install --package-lock-only --ignore-scripts
+
+      - name: Commit version bump to dev
+        id: commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.version.outputs.version }}"
+
+          if git diff --quiet -- package.json package-lock.json; then
+            echo "Version v${VERSION} is already prepared on dev."
+            echo "pushed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add package.json package-lock.json
+          git commit -m "chore(release): prepare v${VERSION}"
+          git push origin HEAD:dev
+          echo "pushed=true" >> "$GITHUB_OUTPUT"
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Trigger CI for version bump
+        if: steps.commit.outputs.pushed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh workflow run ci.yml --ref dev
