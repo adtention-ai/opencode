@@ -2,11 +2,13 @@
 // Standalone CLI for the ADtention OpenCode plugin: `npx @adtention/opencode key` prints this
 // install's publisher_id + secret so the user can link it to their account and claim its earnings.
 //
-// The identity is written by the TUI plugin. Its primary store is OpenCode's own KV
-// (~/.local/state/opencode/kv.json, key "adtention:identity") — always present for a registered
-// install — and it's also mirrored to a stable home-dir backup that survives a KV wipe. This CLI
-// reads the KV first (works for every existing install) and falls back to the backup. The secret is
-// a credential, so it only prints on this explicit, user-run command, never in the TUI line.
+// The identity is written by the TUI plugin to OpenCode's own KV (~/.local/state/opencode/kv.json,
+// key "adtention:identity"), which is always present for a registered install. This CLI reads the KV
+// first, so it works for every existing install. It also falls back to a stable home-dir backup
+// (~/.adtention/opencode-identity.json) that would survive a KV wipe, but writing that file is a
+// planned follow-up: the TUI does not write it yet, so the fallback is currently dormant and reads
+// succeed via the KV. The secret is a credential, so it only prints on this explicit, user-run
+// command, never in the TUI line.
 import { readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
