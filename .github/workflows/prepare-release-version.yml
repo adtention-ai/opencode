@@ -1,0 +1,214 @@
+name: Prepare release version
+
+on:
+  pull_request:
+    types:
+      - opened
+      - reopened
+      - synchronize
+      - labeled
+      - unlabeled
+      - ready_for_review
+    branches:
+      - main
+
+permissions:
+  actions: write
+  contents: write
+  pull-requests: read
+  statuses: write
+
+concurrency:
+  group: prepare-release-version-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    name: prepare
+    if: >
+      github.event.pull_request.base.ref == 'main' &&
+      github.event.pull_request.head.ref == 'dev' &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout dev
+        uses: actions/checkout@v4
+        with:
+          ref: dev
+          fetch-depth: 0
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Calculate next version
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin main --depth=1
+          MAIN_PACKAGE_JSON="$(git show origin/main:package.json)"
+          MAIN_PACKAGE_JSON="$MAIN_PACKAGE_JSON" node <<'NODE' > "$GITHUB_OUTPUT"
+          const fs = require("node:fs")
+          const event = JSON.parse(fs.readFileSync(process.env.GITHUB_EVENT_PATH, "utf8"))
+          const mainPackage = JSON.parse(process.env.MAIN_PACKAGE_JSON)
+          const labels = new Set(event.pull_request.labels.map((label) => label.name))
+          const bump = labels.has("release:major") ? "major" : labels.has("release:minor") ? "minor" : "patch"
+          const match = /^(\d+)\.(\d+)\.(\d+)$/.exec(mainPackage.version)
+
+          if (!match) {
+            throw new Error(`Cannot calculate next release from non-standard version: ${mainPackage.version}`)
+          }
+
+          let [, major, minor, patch] = match.map(Number)
+
+          if (bump === "major") {
+            major += 1
+            minor = 0
+            patch = 0
+          } else if (bump === "minor") {
+            minor += 1
+            patch = 0
+          } else {
+            patch += 1
+          }
+
+          console.log(`package_name=${mainPackage.name}`)
+          console.log(`main_version=${mainPackage.version}`)
+          console.log(`bump=${bump}`)
+          console.log(`version=${major}.${minor}.${patch}`)
+          NODE
+
+      - name: Verify version is unreleased
+        shell: bash
+        run: |
+          set -euo pipefail
+          PACKAGE_NAME="${{ steps.version.outputs.package_name }}"
+          VERSION="${{ steps.version.outputs.version }}"
+
+          if git ls-remote --exit-code --tags origin "refs/tags/v${VERSION}" >/dev/null 2>&1; then
+            echo "Tag v${VERSION} already exists."
+            exit 1
+          fi
+
+          set +e
+          NPM_OUTPUT="$(npm view "${PACKAGE_NAME}@${VERSION}" version 2>&1)"
+          NPM_STATUS=$?
+          set -e
+
+          if [ "$NPM_STATUS" -eq 0 ]; then
+            echo "${PACKAGE_NAME}@${VERSION} already exists on npm."
+            exit 1
+          fi
+
+          if ! printf '%s' "$NPM_OUTPUT" | grep -Eq 'E404|404 Not Found|No match found|is not in this registry'; then
+            echo "$NPM_OUTPUT"
+            exit "$NPM_STATUS"
+          fi
+
+      - name: Update package version
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.version.outputs.version }}"
+          npm version "$VERSION" --no-git-tag-version --allow-same-version
+          npm install --package-lock-only --ignore-scripts
+
+      - name: Commit version bump to dev
+        id: commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.version.outputs.version }}"
+
+          if git diff --quiet -- package.json package-lock.json; then
+            echo "Version v${VERSION} is already prepared on dev."
+            echo "pushed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add package.json package-lock.json
+          git commit -m "chore(release): prepare v${VERSION}"
+          git push origin HEAD:dev
+          echo "pushed=true" >> "$GITHUB_OUTPUT"
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Trigger CI for version bump
+        if: steps.commit.outputs.pushed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          SHA="${{ steps.commit.outputs.sha }}"
+          CONTEXT="ci"
+
+          gh api "repos/${GITHUB_REPOSITORY}/statuses/${SHA}" \
+            -f state=pending \
+            -f context="$CONTEXT" \
+            -f description="CI workflow dispatched for version bump"
+
+          gh workflow run ci.yml --ref dev
+
+          RUN_ID=""
+          for _ in {1..30}; do
+            RUN_ID="$(gh run list \
+              --repo "$GITHUB_REPOSITORY" \
+              --workflow ci.yml \
+              --branch dev \
+              --event workflow_dispatch \
+              --json databaseId,headSha \
+              --jq "map(select(.headSha == \"${SHA}\")) | first | .databaseId // \"\"")"
+
+            if [ -n "$RUN_ID" ]; then
+              break
+            fi
+
+            sleep 2
+          done
+
+          if [ -z "$RUN_ID" ]; then
+            gh api "repos/${GITHUB_REPOSITORY}/statuses/${SHA}" \
+              -f state=error \
+              -f context="$CONTEXT" \
+              -f description="CI workflow dispatch was not found"
+            exit 1
+          fi
+
+          RUN_URL="$(gh run view "$RUN_ID" --repo "$GITHUB_REPOSITORY" --json url --jq .url)"
+
+          for _ in {1..90}; do
+            STATUS="$(gh run view "$RUN_ID" --repo "$GITHUB_REPOSITORY" --json status --jq .status)"
+
+            if [ "$STATUS" = "completed" ]; then
+              break
+            fi
+
+            sleep 10
+          done
+
+          CONCLUSION="$(gh run view "$RUN_ID" --repo "$GITHUB_REPOSITORY" --json conclusion --jq .conclusion)"
+
+          if [ "$CONCLUSION" = "success" ]; then
+            STATE="success"
+            DESCRIPTION="CI workflow passed"
+          else
+            STATE="failure"
+            DESCRIPTION="CI workflow concluded: ${CONCLUSION:-unknown}"
+          fi
+
+          gh api "repos/${GITHUB_REPOSITORY}/statuses/${SHA}" \
+            -f state="$STATE" \
+            -f context="$CONTEXT" \
+            -f target_url="$RUN_URL" \
+            -f description="$DESCRIPTION"
+
+          [ "$STATE" = "success" ]
