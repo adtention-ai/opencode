@@ -23,6 +23,9 @@
   "exports": {
     "./tui": "./src/tui.tsx"
   },
+  "bin": {
+    "adtention-opencode": "./src/cli.mjs"
+  },
   "engines": {
     "opencode": ">=1.17.0"
   },
