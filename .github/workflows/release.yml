@@ -89,7 +89,11 @@ jobs:
         run: npm run build
 
       - name: Publish to npm
-        run: npm publish --access public
+        # --provenance attaches a signed attestation linking this npm version to the exact repo +
+        # commit + workflow run (verifiable via the npm "Provenance" badge / `npm audit signatures`).
+        # Uses the id-token: write permission already granted above; CI-only so a manual publish
+        # (which can't generate provenance) isn't broken by it.
+        run: npm publish --access public --provenance
 
       - name: Create Git tag
         shell: bash
